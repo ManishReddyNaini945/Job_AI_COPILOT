@@ -203,7 +203,8 @@ async function runAutoApply(profile) {
             const applyStatus = {
               applied: "Applied",
               unconfirmed: "Not confirmed (check on Naukri)",
-              failed: "Apply manually"
+              failed: "Apply manually",
+              error: "Apply manually" // still logged, so "Re-check" can find it if Naukri counted it
             }[result?.status];
 
             if (applyStatus) {
@@ -485,18 +486,27 @@ async function applyInNewTab(url) {
   try {
     await waitForTabLoad(tab.id);
     await delay(2000);
-    const result = await chrome.tabs.sendMessage(tab.id, { action: "APPLY_ON_JOB_PAGE" });
-    if (result?.status === "external") {
+    // Naukri often leaves the job page after Apply or the last answer (e.g. to its
+    // "applied" / similar-jobs page). That destroys the page script, so the message fails
+    // even though the application went through: verify it instead of dropping the job.
+    const result = await chrome.tabs.sendMessage(tab.id, { action: "APPLY_ON_JOB_PAGE" })
+      .then(res => res || { status: "unconfirmed", reason: "no answer from the job page" })
+      .catch(error => ({ status: "unconfirmed", reason: `job page changed during apply (${error.message})` }));
+    if (result.status === "external") {
       // Empty if the careers page couldn't be captured (the Naukri link is in its own column).
       result.companyWebsite = (await findCompanySiteUrl(tab.id)) || "";
     }
 
-    // Naukri often submits after the last answer without showing a success message while
-    // the question panel is open. Before calling it a failure, reload the job page: it
-    // shows "Applied" if the application went through.
-    if (result?.status === "failed" || result?.status === "unconfirmed") {
+    // Naukri often submits without showing a success message where we look for it. Before
+    // calling it a failure, open the job page again: it shows "Applied" if it went through.
+    if (result.status === "failed" || result.status === "unconfirmed") {
+      const landedUrl = (await chrome.tabs.get(tab.id).catch(() => null))?.url || "";
+      if (/naukri\.com\/(myapply|.*saveApply|.*apply-?confirmation)/i.test(landedUrl)) {
+        return { ...result, status: "applied", reason: "Naukri showed its applied page" };
+      }
+
       const loaded = waitForTabLoad(tab.id);
-      await chrome.tabs.reload(tab.id);
+      await chrome.tabs.update(tab.id, { url }); // back to the job page, wherever the tab went
       await loaded.catch(() => {});
       await delay(2500);
       const check = await chrome.tabs.sendMessage(tab.id, { action: "CHECK_APPLIED" }).catch(() => null);
@@ -505,6 +515,9 @@ async function applyInNewTab(url) {
         // Naukri had already counted the application (often on clicking Apply); the stuck
         // question was an extra recruiter question. Keep it in the reason.
         return { ...result, status: "applied", reason: `confirmed on job page${result.reason ? ` (${result.reason})` : ""}` };
+      }
+      if (landedUrl && landedUrl.split("?")[0] !== url.split("?")[0]) {
+        result.reason = `${result.reason || "not confirmed"}; tab had moved to ${landedUrl.slice(0, 150)}`;
       }
     }
     return result;
