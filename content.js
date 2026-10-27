@@ -22,6 +22,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }, 8000).then(state => sendResponse({ applied: state === "yes", headerHtml: jobHeaderSnapshot() }));
     return true;
   }
+  if (request.action === "IS_SUCCESS_PAGE") {
+    // Wherever Naukri took the tab after applying: does it show the success message?
+    waitFor(isApplySuccess, 5000).then(ok => sendResponse({ applied: !!ok }));
+    return true;
+  }
   if (request.action === "CLICK_COMPANY_SITE") {
     // A real click: Chrome's pop-up blocker stops script clicks from opening the careers tab.
     const btn = findCompanySiteButton();
@@ -129,8 +134,12 @@ function findCompanySiteButton() {
   ) || null;
 }
 
+// Naukri's success screen: "Applied successfully - We have sent your application to <company>".
+// \s+ because the words often sit in separate elements (innerText then has a line break).
+const SUCCESS_TEXT = /applied\s+successfully|successfully\s+applied|sent\s+your\s+application|application\s+(has\s+been\s+)?(sent|submitted)/i;
+
 function isApplySuccess() {
-  if (/successfully applied|applied successfully|application (has been )?(sent|submitted)/i.test(document.body.innerText)) {
+  if (SUCCESS_TEXT.test(document.body.innerText)) {
     return true;
   }
   return [...document.querySelectorAll('#already-applied, button')].some(
@@ -141,7 +150,7 @@ function isApplySuccess() {
 // Looser check used after a reload (only when no Apply button is visible): "already
 // applied" text, or an element styled as the apply button now reading "Applied".
 function pageShowsApplied() {
-  if (/already applied|successfully applied|applied successfully/i.test(document.body.innerText)) return true;
+  if (/already\s+applied/i.test(document.body.innerText) || SUCCESS_TEXT.test(document.body.innerText)) return true;
   return [...document.querySelectorAll('#already-applied, [id*="already-applied"], button, [class*="apply" i]')]
     .some(el => isVisible(el) && /^applied$/i.test(el.innerText.trim()));
 }

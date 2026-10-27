@@ -504,6 +504,13 @@ async function applyInNewTab(url) {
       if (/naukri\.com\/(myapply|.*saveApply|.*apply-?confirmation)/i.test(landedUrl)) {
         return { ...result, status: "applied", reason: "Naukri showed its applied page" };
       }
+      // The page the tab landed on may itself show "Applied successfully - We have sent
+      // your application to ...".
+      await waitForTabLoad(tab.id, 8000).catch(() => {});
+      const landed = await chrome.tabs.sendMessage(tab.id, { action: "IS_SUCCESS_PAGE" }).catch(() => null);
+      if (landed?.applied) {
+        return { ...result, status: "applied", reason: "Naukri showed 'Applied successfully'" };
+      }
 
       const loaded = waitForTabLoad(tab.id);
       await chrome.tabs.update(tab.id, { url }); // back to the job page, wherever the tab went
