@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Job AI Co-Pilot",
+  "version": "1.0",
+  "description": "Auto-fills job screening questions on Naukri and LinkedIn using AI.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "downloads",
+    "debugger"
+  ],
+  "host_permissions": [
+    "https://*.naukri.com/*",
+    "https://*.linkedin.com/*",
+    "https://api.groq.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.naukri.com/*",
+        "https://*.linkedin.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- STICKY HEADER -->
+    <header class="app-header">
+      <h2>Job AI Co-Pilot</h2>
+    </header>
+
+    <!-- SCROLLABLE SETTINGS -->
+    <main class="app-body">
+
+    <!-- RESUME -->
+    <fieldset>
+      <legend>Resume</legend>
+      <label>Upload resume (PDF or .txt)</label>
+      <input type="file" id="resumeFile" accept=".pdf,.txt">
+      <p class="hint">Your experience, skills, company, designation and projects are read from it, and it's used to answer screening questions.</p>
+      <div id="resumeInfo" class="resume-info">No resume uploaded yet.</div>
+      <p class="hint" id="openTabHint">Popup closes when you pick the file? <a href="#" id="openInTabLink">Open in a tab</a> and upload there.</p>
+    </fieldset>
+
+    <!-- PREFERENCES -->
+    <fieldset>
+      <legend>Target Preferences</legend>
+      <label>Target Roles (comma separated)</label>
+      <input type="text" id="targetRole" placeholder="Frontend Developer, React Developer">
+      
+      <label>Preferred Locations</label>
+      <input type="text" id="targetLocation" placeholder="Hyderabad, Bangalore">
+
+      <label>Posted Within</label>
+      <select id="jobAge">
+        <option value="1">Last 1 day</option>
+        <option value="3" selected>Last 3 days</option>
+        <option value="7">Last 7 days</option>
+        <option value="15">Last 15 days</option>
+      </select>
+    </fieldset>
+
+    <!-- DETAILS NOT IN A RESUME -->
+    <fieldset>
+      <legend>Salary & Joining</legend>
+      <label>Current CTC</label>
+      <input type="text" id="currentCTC" placeholder="10 LPA">
+
+      <label>Expected CTC</label>
+      <input type="text" id="expectedCTC" placeholder="15 LPA">
+
+      <label>Current Fixed Salary</label>
+      <input type="text" id="fixedSalary" placeholder="9 LPA">
+
+      <label>Notice Period</label>
+      <input type="text" id="noticePeriod" placeholder="30 Days">
+
+      <label>Notice Period Negotiable / Can Join Early?</label>
+      <select id="noticeNegotiable">
+        <option>Yes</option>
+        <option>No</option>
+      </select>
+
+      <label>Employment Status</label>
+      <select id="employmentStatus">
+        <option>Employed</option>
+        <option>Serving notice period</option>
+        <option>Not currently working</option>
+      </select>
+
+      <label>Last Working Date (if serving notice)</label>
+      <input type="text" id="lastWorkingDate" placeholder="30/11/2026">
+
+      <label>Competing Offers?</label>
+      <select id="competingOffers">
+        <option>No</option>
+        <option>Yes</option>
+      </select>
+
+      <label>Reason for Job Change</label>
+      <input type="text" id="reasonForChange" placeholder="Looking for bigger challenges and growth">
+    </fieldset>
+
+    <fieldset>
+      <legend>Personal</legend>
+      <label>Date of Birth</label>
+      <input type="text" id="dob" placeholder="DD/MM/YYYY">
+
+      <label>Gender</label>
+      <select id="gender">
+        <option value="">Not set</option>
+        <option>Male</option>
+        <option>Female</option>
+        <option>Prefer not to say</option>
+      </select>
+
+      <label>Marital Status</label>
+      <select id="maritalStatus">
+        <option value="">Not set</option>
+        <option>Single</option>
+        <option>Married</option>
+      </select>
+
+      <label>Hometown</label>
+      <input type="text" id="hometown" placeholder="Vijayawada">
+
+      <label>Languages Known (comma separated)</label>
+      <input type="text" id="languages" placeholder="English, Hindi, Telugu">
+
+      <label>Valid Passport?</label>
+      <select id="passport">
+        <option value="">Not set</option>
+        <option>Yes</option>
+        <option>No</option>
+      </select>
+
+      <label>Career Gap?</label>
+      <select id="careerGap">
+        <option>No</option>
+        <option>Yes</option>
+      </select>
+    </fieldset>
+
+    <fieldset>
+      <legend>Work Preferences</legend>
+      <label>Willing to Relocate?</label>
+      <select id="willingToRelocate">
+        <option>Yes</option>
+        <option>No</option>
+      </select>
+
+      <label>Preferred Work Mode</label>
+      <select id="workMode">
+        <option>Any</option>
+        <option>Work from office</option>
+        <option>Hybrid</option>
+        <option>Remote</option>
+      </select>
+
+      <label>Comfortable Working from Office?</label>
+      <select id="workFromOffice">
+        <option>Yes</option>
+        <option>No</option>
+      </select>
+
+      <label>Comfortable with Night / Rotational Shifts?</label>
+      <select id="shifts">
+        <option>Yes</option>
+        <option>No</option>
+      </select>
+
+      <label>Willing to Travel?</label>
+      <select id="travel">
+        <option>Yes</option>
+        <option>No</option>
+      </select>
+    </fieldset>
+
+    <fieldset>
+      <legend>Education Scores & Links</legend>
+      <label>10th Percentage / CGPA</label>
+      <input type="text" id="tenthScore" placeholder="85%">
+
+      <label>12th / Diploma Percentage</label>
+      <input type="text" id="twelfthScore" placeholder="88%">
+
+      <label>Graduation Percentage / CGPA</label>
+      <input type="text" id="gradScore" placeholder="7.8 CGPA">
+
+      <label>LinkedIn URL</label>
+      <input type="text" id="linkedin" placeholder="https://linkedin.com/in/...">
+
+      <label>GitHub / Portfolio URL</label>
+      <input type="text" id="portfolio" placeholder="https://github.com/...">
+    </fieldset>
+
+    <button id="saveBtn" class="btn-primary">Save Profile & Preferences</button>
+
+    <!-- APPLIED HISTORY LIST -->
+    <fieldset class="history-fieldset">
+      <legend>Job Log (<span id="appliedCount">0</span>)</legend>
+      <div id="appliedHistory" class="history-list">
+        <p class="empty-msg">No job applications logged yet.</p>
+      </div>
+    </fieldset>
+
+    <button id="exportCsvBtn" class="btn-success">Export to Excel (.csv)</button>
+    <button id="clearJobsBtn" class="btn-danger">Clear History</button>
+    <button id="copyDebugBtn" class="btn-danger">Copy debug info (last stuck question)</button>
+
+    </main>
+
+    <!-- STICKY FOOTER: status + automation control -->
+    <footer class="app-footer">
+      <div id="quotaInfo" class="quota-info"></div>
+      <div id="status"></div>
+      <div class="controls">
+        <button id="startAutoApplyBtn" class="btn-start">▶ Start Auto-Apply</button>
+        <button id="stopAutoApplyBtn" class="btn-stop">⏹ Stop</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

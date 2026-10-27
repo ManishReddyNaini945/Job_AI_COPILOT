@@ -1,0 +1,6 @@
+# Local secrets (API keys)
+config.js
+
+# OS / editor files
+.DS_Store
+*.log
