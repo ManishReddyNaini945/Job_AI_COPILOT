@@ -282,6 +282,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Re-opens every "Apply manually" job and marks it Applied if Naukri already shows it so.
+  document.getElementById('recheckBtn').addEventListener('click', () => {
+    showStatus("Re-checking jobs on Naukri... (a few seconds per job)", true);
+    chrome.runtime.sendMessage({ action: "RECHECK_MANUAL" }, (response) => {
+      showStatus(response?.status || "Re-check finished.");
+    });
+  });
+
   // Copies the last stuck question's drawer snapshot, to paste to the developer.
   document.getElementById('copyDebugBtn').addEventListener('click', () => {
     chrome.storage.local.get(['lastStuckDebug'], async ({ lastStuckDebug }) => {

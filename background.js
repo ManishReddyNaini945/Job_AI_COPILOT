@@ -20,25 +20,6 @@ const QUOTA_MESSAGE = `${DAILY_LIMIT} jobs applied today. Daily quota is ${DAILY
 let isRunning = false;
 let logTabId = null;
 
-// One-time cleanup (runs when the extension is reloaded/updated): an earlier version's
-// reload check wrongly marked failed applications as "Applied". Remove those rows so they
-// are retried, and take them back off today's count.
-chrome.runtime.onInstalled.addListener(async () => {
-  const { appliedJobs = [], dailyQuota, fixedFalseApplied } =
-    await chrome.storage.local.get(['appliedJobs', 'dailyQuota', 'fixedFalseApplied']);
-  if (fixedFalseApplied) return;
-
-  const isFalse = (job) => /confirmed on the job page after reload/.test(job.description || "");
-  const today = new Date().toLocaleDateString();
-  const removedToday = appliedJobs.filter(job => isFalse(job) && job.appliedDate === today).length;
-
-  const update = { appliedJobs: appliedJobs.filter(job => !isFalse(job)), fixedFalseApplied: true };
-  if (dailyQuota?.date === new Date().toLocaleDateString("en-CA")) {
-    update.dailyQuota = { ...dailyQuota, count: Math.max(0, dailyQuota.count - removedToday) };
-  }
-  await chrome.storage.local.set(update);
-});
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "GENERATE_ANSWER") {
     handleAIAnswerGeneration(request.data)
@@ -77,6 +58,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ status: `Searching all roles × locations... (${DAILY_LIMIT - count} applications left today)` });
       }
     });
+    return true;
+  }
+
+  if (request.action === "RECHECK_MANUAL") {
+    if (isRunning) {
+      sendResponse({ status: "Stop the auto-apply run first." });
+      return;
+    }
+    recheckManualJobs()
+      .then(({ checked, nowApplied }) => sendResponse({
+        status: `Re-checked ${checked} job(s): ${nowApplied} were already applied on Naukri.`
+      }))
+      .catch(error => sendResponse({ status: `Re-check failed: ${error.message}` }));
     return true;
   }
 
@@ -300,6 +294,35 @@ async function detachDebugger(tabId) {
   await chrome.debugger.detach({ tabId }).catch(() => {});
 }
 
+// ---------- Re-check "Apply manually" jobs ----------
+// Opens each "Apply manually" job and asks Naukri whether it's already applied (often the
+// application went through on clicking Apply, before an extra question got stuck).
+async function recheckManualJobs() {
+  const { appliedJobs = [] } = await chrome.storage.local.get('appliedJobs');
+  const manual = appliedJobs.filter(job => job.status === "Apply manually" && job.url);
+  let nowApplied = 0;
+
+  for (const job of manual) {
+    const tab = await chrome.tabs.create({ url: job.url, active: false });
+    try {
+      await waitForTabLoad(tab.id).catch(() => {});
+      await delay(2500);
+      const check = await chrome.tabs.sendMessage(tab.id, { action: "CHECK_APPLIED" }).catch(() => null);
+      if (check?.applied) {
+        job.status = "Applied";
+        job.description = `${job.description} | confirmed on job page by re-check`;
+        nowApplied++;
+      }
+    } finally {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+    await delay(1500);
+  }
+
+  await chrome.storage.local.set({ appliedJobs }); // rows were updated in place
+  return { checked: manual.length, nowApplied };
+}
+
 // ---------- Daily quota ----------
 
 // Local date as YYYY-MM-DD, so the count resets at the user's midnight.
@@ -473,7 +496,9 @@ async function applyInNewTab(url) {
       const check = await chrome.tabs.sendMessage(tab.id, { action: "CHECK_APPLIED" }).catch(() => null);
       if (result.debug) result.debug.afterReloadHeaderHtml = check?.headerHtml || "(no response)";
       if (check?.applied) {
-        return { ...result, status: "applied", reason: "confirmed on the job page after reload" };
+        // Naukri had already counted the application (often on clicking Apply); the stuck
+        // question was an extra recruiter question. Keep it in the reason.
+        return { ...result, status: "applied", reason: `confirmed on job page${result.reason ? ` (${result.reason})` : ""}` };
       }
     }
     return result;
