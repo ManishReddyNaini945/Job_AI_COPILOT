@@ -3,18 +3,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Today's applications vs the daily quota (must match DAILY_LIMIT in background.js).
   const DAILY_LIMIT = 50;
-  // Same rule as getTodayCount() in background.js: only submitted applications
-  // ("Applied" / "Applied (not confirmed - check)") count towards the quota.
+  // Same rule as getTodayCount() in background.js: only confirmed submissions
+  // (status exactly "Applied") count towards the quota.
   function renderQuota({ dailyQuota, appliedJobs = [] }) {
     const today = new Date().toLocaleDateString();
     const todays = appliedJobs.filter(j => j.appliedDate === today);
     const counter = dailyQuota?.date === new Date().toLocaleDateString("en-CA") ? dailyQuota.count : 0;
-    const count = Math.max(counter, todays.filter(j => /^Applied/.test(j.status)).length);
+    const count = Math.max(counter, todays.filter(j => j.status === "Applied").length);
     const companySite = todays.filter(j => j.status === "Apply on company site").length;
     const manual = todays.filter(j => j.status === "Apply manually").length;
+    const unconfirmed = todays.filter(j => /not confirmed/i.test(j.status)).length;
 
     const el = document.getElementById('quotaInfo');
-    const extras = [companySite && `${companySite} company site`, manual && `${manual} manual`].filter(Boolean);
+    const extras = [companySite && `${companySite} company site`, manual && `${manual} manual`,
+      unconfirmed && `${unconfirmed} unconfirmed`].filter(Boolean);
     el.innerText = (count >= DAILY_LIMIT
       ? `Daily quota reached: ${count} / ${DAILY_LIMIT} applied today`
       : `Today: ${count} / ${DAILY_LIMIT} applied`) + (extras.length ? ` · ${extras.join(" · ")}` : "");
@@ -148,7 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const countSpan = document.getElementById('appliedCount');
 
     // e.g. "24 total · 10 applied": the log also holds company-site and manual jobs.
-    const submitted = jobs.filter(j => /^Applied/.test(j.status)).length;
+    const submitted = jobs.filter(j => j.status === "Applied").length;
     countSpan.innerText = `${jobs.length} total · ${submitted} applied`;
 
     if (jobs.length === 0) {
@@ -159,7 +161,7 @@ document.addEventListener('DOMContentLoaded', () => {
     historyContainer.innerHTML = jobs.map(job => {
       // Why it wasn't submitted, e.g. 'stuck on: "DOB" [box has "...", Save still grey]'
       // (stored after " | " in the description).
-      const reason = /^Apply manually|not confirmed/.test(job.status)
+      const reason = /^Apply manually|not confirmed/i.test(job.status)
         ? (job.description || "").split(" | ").slice(1).join(" | ")
         : "";
       return `

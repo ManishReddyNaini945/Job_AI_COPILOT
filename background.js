@@ -196,14 +196,16 @@ async function runAutoApply(profile) {
             // Keep the latest stuck question's snapshot for the popup's "Copy debug info".
             if (result?.debug) await chrome.storage.local.set({ lastStuckDebug: result.debug });
 
+            // Only "Applied" means a confirmed submission (Naukri showed success, or the
+            // reloaded job page shows Applied). Nothing else counts as applied.
             const applyStatus = {
               applied: "Applied",
-              unconfirmed: "Applied (not confirmed - check)",
+              unconfirmed: "Not confirmed (check on Naukri)",
               failed: "Apply manually"
             }[result?.status];
 
             if (applyStatus) {
-              if (result.status !== "failed") {
+              if (result.status === "applied") {
                 applied++;
                 applyTimeMs += jobMs;
                 todayCount = await addToTodayCount();
@@ -299,7 +301,8 @@ async function detachDebugger(tabId) {
 // application went through on clicking Apply, before an extra question got stuck).
 async function recheckManualJobs() {
   const { appliedJobs = [] } = await chrome.storage.local.get('appliedJobs');
-  const manual = appliedJobs.filter(job => job.status === "Apply manually" && job.url);
+  const manual = appliedJobs.filter(job => job.url &&
+    ["Apply manually", "Not confirmed (check on Naukri)", "Applied (not confirmed - check)"].includes(job.status));
   let nowApplied = 0;
 
   for (const job of manual) {
@@ -328,14 +331,14 @@ async function recheckManualJobs() {
 // Local date as YYYY-MM-DD, so the count resets at the user's midnight.
 const todayKey = () => new Date().toLocaleDateString("en-CA");
 
-// Today's submitted applications: the larger of the running counter and today's
-// "Applied..." rows in the log (so applications from before the counter existed count,
-// and clearing the log doesn't reset the quota).
+// Today's confirmed applications: the larger of the running counter and today's
+// "Applied" rows in the log (so clearing the log doesn't reset the quota). Only status
+// "Applied" counts: not "Not confirmed", "Apply manually" or "Apply on company site".
 async function getTodayCount() {
   const { dailyQuota, appliedJobs = [] } = await chrome.storage.local.get(['dailyQuota', 'appliedJobs']);
   const counter = dailyQuota?.date === todayKey() ? dailyQuota.count : 0;
   const today = new Date().toLocaleDateString();
-  const fromLog = appliedJobs.filter(j => j.appliedDate === today && /^Applied/.test(j.status)).length;
+  const fromLog = appliedJobs.filter(j => j.appliedDate === today && j.status === "Applied").length;
   return Math.max(counter, fromLog);
 }
 
