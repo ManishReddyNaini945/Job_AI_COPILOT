@@ -23,8 +23,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   if (request.action === "CLICK_COMPANY_SITE") {
-    findCompanySiteButton()?.click();
-    sendResponse({ ok: true });
+    // A real click: Chrome's pop-up blocker stops script clicks from opening the careers tab.
+    const btn = findCompanySiteButton();
+    (btn ? realClick(btn) : Promise.resolve()).then(() => sendResponse({ ok: !!btn }));
+    return true;
   }
   if (request.action === "LOG") {
     console.log("[Job AI Co-Pilot]", request.text);
@@ -108,8 +110,10 @@ async function applyOnJobPage() {
 // Only visible, enabled buttons count: Naukri can keep both buttons in the page and
 // hide the one that doesn't apply to this job.
 function findApplyButton() {
+  // After applying, Naukri keeps the same #apply-button and only changes its text to
+  // "Applied", so the text must still say Apply.
   const byId = [...document.querySelectorAll('#apply-button, .jobs-apply-button')]
-    .find(b => !b.disabled && isVisible(b));
+    .find(b => !b.disabled && isVisible(b) && /^(easy\s+)?apply( now)?$/i.test(b.innerText.trim()));
   if (byId) return byId;
 
   // Match a button whose text is exactly "Apply" / "Easy Apply" (not "Apply on company site").

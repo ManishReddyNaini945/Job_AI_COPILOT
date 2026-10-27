@@ -186,7 +186,9 @@ async function runAutoApply(profile) {
                 companyWebsite: result.companyWebsite,
                 timeTakenMs: jobMs
               });
-              log(`  Saved to sheet: ${result.companyWebsite}`);
+              log(result.companyWebsite
+                ? `  Saved to sheet: ${result.companyWebsite}`
+                : `  Careers page link not captured; open the Naukri job link to apply.`);
             }
 
             for (const { question, answer } of result?.answers || []) {
@@ -485,7 +487,8 @@ async function applyInNewTab(url) {
     await delay(2000);
     const result = await chrome.tabs.sendMessage(tab.id, { action: "APPLY_ON_JOB_PAGE" });
     if (result?.status === "external") {
-      result.companyWebsite = (await findCompanySiteUrl(tab.id)) || url;
+      // Empty if the careers page couldn't be captured (the Naukri link is in its own column).
+      result.companyWebsite = (await findCompanySiteUrl(tab.id)) || "";
     }
 
     // Naukri often submits after the last answer without showing a success message while
@@ -515,13 +518,16 @@ async function applyInNewTab(url) {
 // Clicks "Apply on company site" and captures where it leads: usually a new tab,
 // sometimes the same tab. Returns null if nothing opened.
 async function findCompanySiteUrl(jobTabId) {
+  const { windowId } = await chrome.tabs.get(jobTabId);
   const openedTab = new Promise(resolve => {
     const timer = setTimeout(() => {
       chrome.tabs.onCreated.removeListener(listener);
       resolve(null);
     }, 10000);
+    // Naukri may open the careers page with "noopener", which leaves openerTabId empty,
+    // so also accept a new tab with no opener in the same window right after the click.
     function listener(newTab) {
-      if (newTab.openerTabId === jobTabId) {
+      if (newTab.openerTabId === jobTabId || (newTab.openerTabId == null && newTab.windowId === windowId)) {
         clearTimeout(timer);
         chrome.tabs.onCreated.removeListener(listener);
         resolve(newTab);
@@ -534,11 +540,19 @@ async function findCompanySiteUrl(jobTabId) {
   const newTab = await openedTab;
 
   if (newTab) {
-    // Wait for redirects to settle so we get the real careers page URL.
-    await waitForTabLoad(newTab.id, 15000).catch(() => {});
-    const finalUrl = (await chrome.tabs.get(newTab.id).catch(() => null))?.url;
+    // Naukri usually goes through a redirect page first; wait (up to 15s) until the tab
+    // leaves naukri.com, so we get the real careers page URL.
+    const offNaukri = (url) => url && /^https?:/.test(url) && !/(^|\.)naukri\.com\//.test(new URL(url).hostname + "/");
+    let finalUrl = null;
+    for (let waited = 0; waited < 15000; waited += 500) {
+      const t = await chrome.tabs.get(newTab.id).catch(() => null);
+      if (!t) break;
+      finalUrl = t.url || t.pendingUrl || finalUrl;
+      if (offNaukri(finalUrl) && t.status === "complete") break;
+      await delay(500);
+    }
     chrome.tabs.remove(newTab.id).catch(() => {});
-    return finalUrl || newTab.pendingUrl || null;
+    return offNaukri(finalUrl) ? finalUrl : null;
   }
 
   const sameTabUrl = (await chrome.tabs.get(jobTabId).catch(() => null))?.url;
