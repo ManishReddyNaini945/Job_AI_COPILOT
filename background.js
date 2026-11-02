@@ -1,7 +1,7 @@
 // background.js - Groq AI & Auto-Search Orchestrator
 //
-// Drives the whole run: for every (role × location) Naukri search, scans each results
-// page, matches jobs against the profile, and applies to matches in a background tab.
+// Drives the whole run: one Naukri search for all roles and locations together, scans each
+// results page, matches jobs against the profile, and applies to matches in a background tab.
 
 // Your Groq API key lives in config.js (git-ignored; copy config.example.js to create it).
 importScripts("config.js");
@@ -10,7 +10,9 @@ const GROQ_API_KEY = self.GROQ_API_KEY;
 // Tried in order; the next one is used when a model is rate-limited or unavailable.
 const GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
 
-const MAX_PAGES_PER_SEARCH = 3;
+// The run keeps going until the daily limit is reached or Naukri has no more pages;
+// this is only a safety cap.
+const MAX_PAGES_PER_SEARCH = 100;
 
 // At most this many submitted applications per day (resets at local midnight), to stay
 // closer to human volume and protect the Naukri account.
@@ -55,7 +57,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ status: QUOTA_MESSAGE, quotaReached: true });
       } else {
         runAutoApply(request.preferences);
-        sendResponse({ status: `Searching all roles × locations... (${DAILY_LIMIT - count} applications left today)` });
+        sendResponse({ status: `Searching all roles and locations... (${DAILY_LIMIT - count} applications left today)` });
       }
     });
     return true;
@@ -97,149 +99,177 @@ function formatDuration(ms) {
 
 async function runAutoApply(profile) {
   isRunning = true;
-
-  const roles = splitList(profile.targetRole);
-  const locations = splitList(profile.targetLocation);
-  const years = parseYears(profile.totalExp);
-
-  const [searchTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  logTabId = searchTab.id;
-
-  // Jobs already applied to (from earlier runs) or already looked at in this run.
-  const { appliedJobs = [] } = await chrome.storage.local.get('appliedJobs');
-  // "Apply on company site" entries are re-checked each run, since older versions
-  // wrongly marked some direct-apply jobs that way.
-  const seen = new Set(
-    appliedJobs.filter(j => j.status !== "Apply on company site").map(j => j.url).filter(Boolean)
-  );
-
-  let applied = 0;
-  let todayCount = await getTodayCount();
-
   // Timing: whole run, and time spent applying (excluding the pauses between jobs).
   const runStarted = Date.now();
   let applyTimeMs = 0;
+  let applied = 0;
+  let runError = null;
 
+  // Everything runs inside try, so isRunning is reset even if setup fails (otherwise
+  // every later Start would answer "Already running.").
   try {
+    const [searchTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    logTabId = searchTab.id;
+
+    // Fix typos ("hyderbad", "banglore") before searching and matching.
+    const { roles, locations } = await correctSearchTerms(
+      splitList(profile.targetRole), splitList(profile.targetLocation)
+    );
+    profile = { ...profile, targetRole: roles.join(", "), targetLocation: locations.join(", ") };
+    const years = parseYears(profile.totalExp);
+
+    // Jobs already applied to (from earlier runs) or already looked at in this run.
+    const { appliedJobs = [] } = await chrome.storage.local.get('appliedJobs');
+    // "Apply on company site" entries are re-checked each run, since older versions
+    // wrongly marked some direct-apply jobs that way.
+    const seen = new Set(
+      appliedJobs.filter(j => j.status !== "Apply on company site").map(j => j.url).filter(Boolean)
+    );
+
+    let todayCount = await getTodayCount();
+
+    const rolesText = roles.join(", ");
+    const locationsText = locations.join(", ");
+
+    // Naukri redirects page 1 to its own location slug (e.g. "hyderabad" ->
+    // "hyderabad-secunderabad"); later pages must be built from that final URL.
+    let firstPageUrl = null;
+
     searchLoop:
-    for (const role of roles) {
-      for (const location of locations) {
-        // Naukri redirects page 1 to its own location slug (e.g. "hyderabad" ->
-        // "hyderabad-secunderabad"); later pages must be built from that final URL.
-        let firstPageUrl = null;
+    for (let page = 1; page <= MAX_PAGES_PER_SEARCH; page++) {
+      if (!isRunning) break searchLoop;
 
-        for (let page = 1; page <= MAX_PAGES_PER_SEARCH; page++) {
-          if (!isRunning) break searchLoop;
+      const pageUrl = page === 1
+        ? buildNaukriSearchUrl(roles, locations, years, profile.jobAge || 3)
+        : withPageNumber(firstPageUrl, page);
+      let landedUrl = await navigate(searchTab.id, pageUrl);
 
-          const pageUrl = page === 1
-            ? buildNaukriSearchUrl(role, location, years, profile.jobAge || 3)
-            : withPageNumber(firstPageUrl, page);
-          const landedUrl = await navigate(searchTab.id, pageUrl);
+      if (page === 1) {
+        // Naukri's redirect to its own slug can drop the Freshness / experience filters:
+        // put them back on the landed URL and load it again.
+        const sent = new URL(pageUrl).searchParams;
+        const landed = new URL(landedUrl);
+        const dropped = ["jobAge", "experience"].filter(k => sent.has(k) && landed.searchParams.get(k) !== sent.get(k));
+        if (dropped.length) {
+          log(`  Naukri dropped the ${dropped.join(" / ")} filter; adding it back.`);
+          for (const k of dropped) landed.searchParams.set(k, sent.get(k));
+          landedUrl = await navigate(searchTab.id, landed.toString());
+        }
+        firstPageUrl = landedUrl;
+      } else if (!new URL(landedUrl).pathname.endsWith(`-${page}`)) {
+        log(`No more results after page ${page - 1}.`);
+        break; // Naukri sent us back to page 1: no more pages
+      }
 
-          if (page === 1) {
-            firstPageUrl = landedUrl;
-          } else if (!new URL(landedUrl).pathname.endsWith(`-${page}`)) {
-            log(`No page ${page} for "${role}" in ${location}.`);
-            break; // Naukri sent us back to page 1: no more pages
+      log(`Searching "${rolesText}" in ${locationsText}, posted within ${profile.jobAge || 3} days (page ${page})...`);
+      if (page === 1) log(`  ${landedUrl}`);
+
+      let jobs;
+      try {
+        jobs = await scanResults(searchTab.id);
+      } catch (error) {
+        log(`Could not scan page ${page} (${error.message}); reloading it once...`);
+        landedUrl = await navigate(searchTab.id, landedUrl);
+        jobs = await scanResults(searchTab.id);
+      }
+      const alreadySeen = jobs.filter(job => seen.has(job.url)).length;
+      log(`Found ${jobs.length} jobs on this page` +
+        (alreadySeen ? ` (${alreadySeen} already in your Job Log, skipped).` : "."));
+      if (jobs.length === 0) {
+        log("No more jobs in this search.");
+        break;
+      }
+
+      for (const job of jobs) {
+        if (!isRunning) break searchLoop;
+        if (seen.has(job.url)) continue;
+        seen.add(job.url);
+
+        const verdict = await matchJob(job, profile, years);
+        const tag = `"${job.title}" @ ${job.company || "?"} (${job.experience || "exp n/a"}, ${job.posted || "date n/a"})`;
+
+        if (!verdict.ok) {
+          log(`✗ ${tag}: ${verdict.reason}`);
+          continue;
+        }
+
+        if (todayCount >= DAILY_LIMIT) {
+          log(`Daily quota reached: ${QUOTA_MESSAGE}`);
+          notifyUser(QUOTA_MESSAGE);
+          break searchLoop;
+        }
+
+        log(`✓ ${tag}: ${verdict.reason}. Applying...`);
+        const jobStarted = Date.now();
+        const result = await applyInNewTab(job.url)
+          .catch(error => ({ status: "error", reason: error.message }));
+        const jobMs = Date.now() - jobStarted;
+        const questionCount = result?.answers?.length || 0;
+        log(`  → ${result?.status} in ${formatDuration(jobMs)}` +
+          (questionCount ? ` (${questionCount} question${questionCount > 1 ? "s" : ""})` : "") +
+          (result?.reason ? ` (${result.reason})` : ""));
+
+        if (result?.status === "external") {
+          await recordApplication(job, verdict.reason, {
+            status: "Apply on company site",
+            companyWebsite: result.companyWebsite,
+            timeTakenMs: jobMs
+          });
+          log(result.companyWebsite
+            ? `  Saved to sheet: ${result.companyWebsite}`
+            : `  Careers page link not captured; open the Naukri job link to apply.`);
+        }
+
+        for (const { question, answer } of result?.answers || []) {
+          log(`    Q: ${question.slice(0, 100)}  →  A: ${answer}`);
+        }
+
+        // Keep the latest stuck question's snapshot for the popup's "Copy debug info".
+        if (result?.debug) await chrome.storage.local.set({ lastStuckDebug: result.debug });
+
+        // Only "Applied" means a confirmed submission (Naukri showed success, or the
+        // reloaded job page shows Applied). Nothing else counts as applied.
+        const applyStatus = {
+          applied: "Applied",
+          unconfirmed: "Not confirmed (check on Naukri)",
+          failed: "Apply manually",
+          error: "Apply manually" // still logged, so "Re-check" can find it if Naukri counted it
+        }[result?.status];
+
+        if (applyStatus) {
+          if (result.status === "applied") {
+            applied++;
+            applyTimeMs += jobMs;
+            todayCount = await addToTodayCount();
+            log(`  Today: ${todayCount} / ${DAILY_LIMIT} applied`);
+          }
+          await recordApplication(
+            job,
+            result.reason ? `${verdict.reason} | ${result.reason}` : verdict.reason,
+            { status: applyStatus, timeTakenMs: jobMs }
+          );
+
+          // Stop straight after the last allowed application (no pause, no next job).
+          if (todayCount >= DAILY_LIMIT) {
+            log(`Daily quota reached: ${QUOTA_MESSAGE}`);
+            notifyUser(QUOTA_MESSAGE);
+            break searchLoop;
           }
 
-          log(`Searching "${role}" in ${location} (page ${page})...`);
-
-          const jobs = await chrome.tabs.sendMessage(searchTab.id, { action: "SCAN_RESULTS" })
-            .then(res => res?.jobs || [])
-            .catch(() => []);
-          log(`Found ${jobs.length} jobs on this page.`);
-          if (jobs.length === 0) break; // no more pages for this search
-
-          for (const job of jobs) {
-            if (!isRunning) break searchLoop;
-            if (seen.has(job.url)) continue;
-            seen.add(job.url);
-
-            const verdict = matchJob(job, profile, years);
-            const tag = `"${job.title}" @ ${job.company || "?"} (${job.experience || "exp n/a"}, ${job.posted || "date n/a"})`;
-
-            if (!verdict.ok) {
-              log(`✗ ${tag}: ${verdict.reason}`);
-              continue;
-            }
-
-            if (todayCount >= DAILY_LIMIT) {
-              log(`Daily quota reached: ${QUOTA_MESSAGE}`);
-              notifyUser(QUOTA_MESSAGE);
-              break searchLoop;
-            }
-
-            log(`✓ ${tag}: ${verdict.reason}. Applying...`);
-            const jobStarted = Date.now();
-            const result = await applyInNewTab(job.url)
-              .catch(error => ({ status: "error", reason: error.message }));
-            const jobMs = Date.now() - jobStarted;
-            const questionCount = result?.answers?.length || 0;
-            log(`  → ${result?.status} in ${formatDuration(jobMs)}` +
-              (questionCount ? ` (${questionCount} question${questionCount > 1 ? "s" : ""})` : "") +
-              (result?.reason ? ` (${result.reason})` : ""));
-
-            if (result?.status === "external") {
-              await recordApplication(job, verdict.reason, {
-                status: "Apply on company site",
-                companyWebsite: result.companyWebsite,
-                timeTakenMs: jobMs
-              });
-              log(result.companyWebsite
-                ? `  Saved to sheet: ${result.companyWebsite}`
-                : `  Careers page link not captured; open the Naukri job link to apply.`);
-            }
-
-            for (const { question, answer } of result?.answers || []) {
-              log(`    Q: ${question.slice(0, 100)}  →  A: ${answer}`);
-            }
-
-            // Keep the latest stuck question's snapshot for the popup's "Copy debug info".
-            if (result?.debug) await chrome.storage.local.set({ lastStuckDebug: result.debug });
-
-            // Only "Applied" means a confirmed submission (Naukri showed success, or the
-            // reloaded job page shows Applied). Nothing else counts as applied.
-            const applyStatus = {
-              applied: "Applied",
-              unconfirmed: "Not confirmed (check on Naukri)",
-              failed: "Apply manually",
-              error: "Apply manually" // still logged, so "Re-check" can find it if Naukri counted it
-            }[result?.status];
-
-            if (applyStatus) {
-              if (result.status === "applied") {
-                applied++;
-                applyTimeMs += jobMs;
-                todayCount = await addToTodayCount();
-                log(`  Today: ${todayCount} / ${DAILY_LIMIT} applied`);
-              }
-              await recordApplication(
-                job,
-                result.reason ? `${verdict.reason} | ${result.reason}` : verdict.reason,
-                { status: applyStatus, timeTakenMs: jobMs }
-              );
-
-              // Stop straight after the last allowed application (no pause, no next job).
-              if (todayCount >= DAILY_LIMIT) {
-                log(`Daily quota reached: ${QUOTA_MESSAGE}`);
-                notifyUser(QUOTA_MESSAGE);
-                break searchLoop;
-              }
-
-              // Random delay (12 to 18 seconds) between applications to avoid bot triggers
-              const randomDelay = Math.floor(Math.random() * 6000) + 12000;
-              log(`Pausing ${formatDuration(randomDelay)} before the next job...`);
-              await delay(randomDelay);
-            }
-          }
+          // Random delay (12 to 18 seconds) between applications to avoid bot triggers
+          const randomDelay = Math.floor(Math.random() * 6000) + 12000;
+          log(`Pausing ${formatDuration(randomDelay)} before the next job...`);
+          await delay(randomDelay);
         }
       }
     }
+  } catch (error) {
+    runError = error;
+    log(`Run stopped by an error: ${error.message}`);
   } finally {
     isRunning = false;
     const totalMs = Date.now() - runStarted;
-    log(`Run complete. Applied to ${applied} job(s) in ${formatDuration(totalMs)}.`);
+    log(`${runError ? "Run ended early" : "Run complete"}. Applied to ${applied} job(s) in ${formatDuration(totalMs)}.`);
     if (applied) {
       log(`  Average per application: ${formatDuration(applyTimeMs / applied)} applying, ` +
         `${formatDuration(totalMs / applied)} including searching and pauses.`);
@@ -380,10 +410,14 @@ function normalize(text) {
 
 const hasTerm = (normText, term) => term && normText.includes(` ${term} `);
 
+// Apply only when you have at least this share of the skills the job asks for, so a
+// job that shares just one skill out of many with you isn't applied to.
+const MIN_SKILL_MATCH = 0.2;
+
 // Experience must fit (your Total Experience inside the job's range, e.g. 3 fits
-// "2-5", "0-3", "3+", "3"). Then EITHER the title matches one of your roles (by
-// keyword, not exact title) OR at least one of your skills appears in the job.
-function matchJob(job, profile, years) {
+// "2-5", "0-3", "3+", "3"). Then you must have at least MIN_SKILL_MATCH of the
+// job's skills (see scoreSkills).
+async function matchJob(job, profile, years) {
   // Naukri's jobAge filter should already exclude old jobs; this catches any that slip through.
   const maxAge = Number(profile.jobAge) || 3;
   const ageDays = parsePostedDays(job.posted);
@@ -399,25 +433,75 @@ function matchJob(job, profile, years) {
   }
 
   const title = normalize(job.title);
-  const cardText = normalize([job.title, job.tags.join(" "), job.description].join(" "));
-
   const roleHit = splitList(profile.targetRole).find(role => {
     const tokens = normalize(role).trim().split(" ");
     const keywords = tokens.filter(t => !GENERIC_ROLE_WORDS.has(t));
     return (keywords.length ? keywords : tokens).every(t => hasTerm(title, t));
   });
 
-  const skills = splitList(profile.skills);
-  const skillHits = skills.filter(s => hasTerm(cardText, normalize(s).trim()));
-
-  if (!roleHit && skillHits.length === 0) {
-    return { ok: false, reason: "title doesn't match your roles and none of your skills mentioned" };
-  }
-
   const reasons = [`exp ${range.label}`];
   if (roleHit) reasons.push(`role ~ ${roleHit}`);
-  if (skillHits.length) reasons.push(`skills: ${skillHits.join(", ")}`);
+
+  const mySkills = splitList(profile.skills);
+  if (mySkills.length === 0) return { ok: false, reason: "your Key Skills are not set" };
+
+  const { jobSkills, matched } = await scoreSkills(job, mySkills);
+  if (jobSkills.length === 0) {
+    // Nothing to score against: fall back to the title matching one of your roles.
+    return roleHit
+      ? { ok: true, reason: [...reasons, "no skills listed on the job"].join("; ") }
+      : { ok: false, reason: "job lists no skills and the title doesn't match your roles" };
+  }
+
+  const score = matched.length / jobSkills.length;
+  const missing = jobSkills.filter(s => !matched.includes(s));
+  const scoreText = `skill match ${Math.round(score * 100)}% (${matched.length}/${jobSkills.length})`;
+  if (score < MIN_SKILL_MATCH) {
+    return {
+      ok: false,
+      reason: `${scoreText}, need ${MIN_SKILL_MATCH * 100}%; missing: ${missing.join(", ")}`
+    };
+  }
+
+  reasons.push(scoreText, `skills: ${matched.join(", ")}`);
   return { ok: true, reason: reasons.join("; ") };
+}
+
+// Lists the skills the job asks for and which of them you have. The AI reads the job
+// card (title, key-skill tags, description) and counts equivalent names as a match
+// ("ReactJS" = "React", "JS" = "JavaScript"). Without the AI, the card's tags are
+// compared with your skills by name.
+async function scoreSkills(job, mySkills) {
+  try {
+    const raw = await callAI(`You screen Naukri job listings for a candidate.
+
+Job title: ${job.title}
+Key skills on the listing: ${job.tags.join(", ") || "(none)"}
+Description: ${job.description || "(none)"}
+
+Candidate's skills: ${mySkills.join(", ")}
+
+1. "jobSkills": the technical skills/tools this job actually needs (at most 10), taken from
+   the title, key skills and description. Include the core skill implied by the title
+   (e.g. "Manual Testing" for a QA Tester role, "Salesforce" for a Salesforce Developer).
+2. "matched": the items of jobSkills the candidate has, copied exactly as written in
+   jobSkills. Count the same skill under another name as a match (ReactJS = React,
+   JS = JavaScript, Node = Node.js), but not a different technology (Selenium is not
+   JavaScript, Angular is not React).
+Reply as JSON: {"jobSkills": [...], "matched": [...]}`, { json: true });
+    const data = JSON.parse(raw.replace(/^```(json)?|```$/g, "").trim());
+    const jobSkills = [...new Set((data.jobSkills || []).filter(s => typeof s === "string" && s.trim()))];
+    const key = (s) => String(s).toLowerCase().trim();
+    const matchedKeys = new Set((data.matched || []).map(key));
+    const matched = jobSkills.filter(s => matchedKeys.has(key(s)));
+    return { jobSkills, matched };
+  } catch (error) {
+    log(`  (AI skill check failed: ${error.message}; comparing tags by name)`);
+    const mine = mySkills.map(s => normalize(s).trim());
+    const jobSkills = [...new Set(job.tags.filter(Boolean))];
+    const matched = jobSkills.filter(tag => mine.includes(normalize(tag).trim()));
+    return { jobSkills, matched };
+  }
 }
 
 // "Just Now" / "Few Hours Ago" -> 0, "3 Days Ago" -> 3, "30+ Days Ago" -> 31,
@@ -453,12 +537,14 @@ const splitList = (text) => (text || "").split(',').map(s => s.trim()).filter(Bo
 
 // ---------- Navigation ----------
 
-function buildNaukriSearchUrl(role, location, years, jobAge) {
-  const slug = (s) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const params = new URLSearchParams({ k: role, l: location });
+// One search for every role and location, the way Naukri's own search bar sends
+// several keywords: ".../frontend-developer-react-developer-jobs-in-hyderabad-bangalore?k=...".
+function buildNaukriSearchUrl(roles, locations, years, jobAge) {
+  const slug = (list) => list.join(" ").toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const params = new URLSearchParams({ k: roles.join(", "), l: locations.join(", ") });
   if (years != null) params.set("experience", Math.floor(years));
   if (jobAge) params.set("jobAge", jobAge); // Naukri's "Freshness" filter, in days
-  return `https://www.naukri.com/${slug(role)}-jobs-in-${slug(location)}?${params}`;
+  return `https://www.naukri.com/${slug(roles)}-jobs-in-${slug(locations)}?${params}`;
 }
 
 // ".../react-developer-jobs-in-hyderabad-secunderabad?k=..." -> "...-secunderabad-2?k=..."
@@ -479,6 +565,24 @@ async function navigate(tabId, url) {
 
 // Opens a job page in a background tab, asks content.js there to apply, then closes the tab.
 // For "Apply on company site" jobs, returns { status: "external", companyWebsite }.
+async function scanResults(tabId) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { action: "SCAN_RESULTS" });
+      if (!Array.isArray(response?.jobs)) throw new Error("results page returned no job list");
+      return response.jobs;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) {
+        log(`Results scan failed (attempt ${attempt}/3): ${error.message}; retrying...`);
+        await delay(1000);
+      }
+    }
+  }
+  throw new Error(`results scan failed after 3 attempts: ${lastError?.message || "no response"}`);
+}
+
 async function applyInNewTab(url) {
   // The tab is opened in front: Chrome holds back background tabs (no focus, paused
   // rendering), which stops typing from registering and Naukri's Save from turning active.
@@ -653,6 +757,44 @@ async function callAI(prompt, { json = false } = {}) {
     if (![404, 429, 498, 500, 502, 503].includes(response.status)) break;
   }
   throw new Error(lastError);
+}
+
+// Fixes typos in the search roles and cities ("hyderbad" -> "Hyderabad", "banglore" ->
+// "Bangalore") and saves the corrected values to the profile. Keeps them as typed if
+// the AI can't be reached.
+async function correctSearchTerms(roles, locations) {
+  let fixed;
+  try {
+    const raw = await callAI(`Correct the spelling of these job-search terms for Naukri.com (India).
+Fix typos only: keep each role's meaning and each city as the user intended, use the
+common spelling Naukri uses for Indian cities (e.g. "Bangalore", "Hyderabad", "Gurgaon").
+Keep the same number of items, in the same order.
+Reply as JSON: {"roles": [...], "locations": [...]}
+
+roles: ${JSON.stringify(roles)}
+locations: ${JSON.stringify(locations)}`, { json: true });
+    fixed = JSON.parse(raw.replace(/^```(json)?|```$/g, "").trim());
+  } catch (error) {
+    log(`Couldn't check spelling of roles/locations (${error.message}); searching as typed.`);
+    return { roles, locations };
+  }
+
+  const pick = (original, corrected) =>
+    Array.isArray(corrected) && corrected.length === original.length && corrected.every(c => typeof c === "string" && c.trim())
+      ? corrected.map(c => c.trim())
+      : original;
+  const result = { roles: pick(roles, fixed.roles), locations: pick(locations, fixed.locations) };
+
+  const changes = [...roles.map((r, i) => [r, result.roles[i]]), ...locations.map((l, i) => [l, result.locations[i]])]
+    .filter(([before, after]) => before !== after);
+  if (changes.length) {
+    log(`Corrected spelling: ${changes.map(([b, a]) => `"${b}" → "${a}"`).join(", ")}`);
+    const { userProfile = {} } = await chrome.storage.local.get('userProfile');
+    await chrome.storage.local.set({ userProfile: {
+      ...userProfile, targetRole: result.roles.join(", "), targetLocation: result.locations.join(", ")
+    } });
+  }
+  return result;
 }
 
 // Takes the resume text (pulled out of the PDF by popup.js), stores it for answering

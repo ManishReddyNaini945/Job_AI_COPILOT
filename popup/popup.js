@@ -183,32 +183,37 @@ document.addEventListener('DOMContentLoaded', () => {
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
   }
 
-  // Save Settings
-  document.getElementById('saveBtn').addEventListener('click', () => {
-    chrome.storage.local.get(['userProfile'], ({ userProfile: saved = {} }) => {
-      // Keep the resume-derived details; overwrite only what's in the form.
+  // Saves the form over the stored profile (keeping the resume-derived details), then
+  // calls done(profile, resumeText).
+  function saveForm(done) {
+    chrome.storage.local.get(['userProfile', 'resumeText'], ({ userProfile: saved = {}, resumeText }) => {
       const userProfile = { ...saved };
       for (const id of Object.keys(FORM_FIELDS)) {
         userProfile[id] = document.getElementById(id).value;
       }
+      const changed = Object.keys(FORM_FIELDS).some(id => (saved[id] || '') !== userProfile[id]);
 
       // answerCache holds AI answers based on the old details; start fresh.
-      chrome.storage.local.set({ userProfile, answerCache: {} }, () => {
-        showStatus("Settings Saved Successfully!");
-      });
+      const update = changed ? { userProfile, answerCache: {} } : { userProfile };
+      chrome.storage.local.set(update, () => done(userProfile, resumeText));
     });
+  }
+
+  // Save Settings
+  document.getElementById('saveBtn').addEventListener('click', () => {
+    saveForm(() => showStatus("Settings Saved Successfully!"));
   });
 
-  // Start Full Automated Navigation Flow
+  // Start Full Automated Navigation Flow. Uses what's in the form now (e.g. a changed
+  // "Posted Within"), even if Save wasn't clicked.
   document.getElementById('startAutoApplyBtn').addEventListener('click', () => {
-    chrome.storage.local.get(['userProfile', 'resumeText'], (result) => {
-      const profile = result.userProfile;
-      if (!result.resumeText || !profile?.totalExp) {
+    saveForm((profile, resumeText) => {
+      if (!resumeText || !profile.totalExp) {
         alert("Please upload your resume first.");
         return;
       }
       if (!profile.targetRole || !profile.targetLocation) {
-        alert("Please fill in Target Roles and Preferred Locations, then click Save Profile & Preferences!");
+        alert("Please fill in Target Roles and Preferred Locations.");
         return;
       }
 

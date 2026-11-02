@@ -5,6 +5,7 @@
   "description": "Auto-fills job screening questions on Naukri and LinkedIn using AI.",
   "permissions": [
     "storage",
+    "tabs",
     "activeTab",
     "downloads",
     "debugger"
